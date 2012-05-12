@@ -5,6 +5,7 @@ coverage/*
 erl_crash.dump
 *_manager_*@*
 cpx_monitor_*@*
+/*.log
 doc/*
 key
 key.pub
@@ -12,6 +13,7 @@ contrib/**/ebin/*
 contrib/**/doc/*
 contrib/mochiweb/_test
 rel/open_rcc
+open_rcc
 deps
 ebin
 .eunit
