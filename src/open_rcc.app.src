@@ -1,0 +1,14 @@
+{application, open_rcc, [
+	{description, ""},
+	{vsn, "1"},
+	{registered, []},
+	{applications, [
+		kernel,
+		stdlib,
+		'OpenACD',
+		amqp_client,
+		rabbit_common
+	]},
+	{mod, { open_rcc, []}},
+	{env, []}
+]}.
