@@ -9,9 +9,7 @@ cpx_monitor_*@*
 doc/*
 key
 key.pub
-contrib/**/ebin/*
-contrib/**/doc/*
-contrib/mochiweb/_test
+contrib/
 rel/open_rcc
 open_rcc
 deps
