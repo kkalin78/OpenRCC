@@ -4,27 +4,32 @@
 CLIENT_DIR="rabbitmq-erlang-client"
 SERVER_DIR="rabbitmq-server"
 CODEGEN_DIR="rabbitmq-codegen"
+RABBIT_VERSION="rabbitmq_v2_8_2"
 
-function git_clone {
+function get_deps {
 	cd contrib
 	echo "==> $1 (get-deps)"
 	git clone "https://github.com/rabbitmq/$1.git"
+    cd $1
+    git checkout $RABBIT_VERSION
 	cd ..
 }
 
-function git_update {
-	if [ -d contrib/$1 ]
-	then
-		cd contrib/$1
-		echo "==> $1 (update-deps)"
-		git pull
-		cd ../..
-	else
-		git_clone $1
-	fi
+function update_deps {
+    if [ -d contrib/$1 ]
+    then
+        cd contrib/$1
+        echo "==> $1 (update-deps)"
+        git checkout $RABBIT_VERSION
+        git pull
+        cd ../..
+   else
+        echo "==> $1 (g-deps)"
+        get_deps $1
+   fi
 }
 
-function delete {
+function delete_deps {
 	echo "==> $1 (delete-deps)"
 	rm -rf contrib/$1
 }
@@ -83,17 +88,17 @@ fi
 
 case $1 in
 	"get")
-		git_clone $CODEGEN_DIR
-		git_clone $CLIENT_DIR
-		git_clone $SERVER_DIR;;
+		get_deps $CODEGEN_DIR
+		get_deps $CLIENT_DIR
+		get_deps $SERVER_DIR;;
 	"update")
-		git_update $CODEGEN_DIR
-		git_update $CLIENT_DIR
-		git_update $SERVER_DIR;;
+		update_deps $CODEGEN_DIR
+		update_deps $CLIENT_DIR
+		update_deps $SERVER_DIR;;
 	"delete")
-		delete $CODEGEN_DIR
-		delete $CLIENT_DIR
-		delete $SERVER_DIR;;
+		update_deps $CODEGEN_DIR
+		update_deps $CLIENT_DIR
+		update_deps $SERVER_DIR;;
 	"pre_compile")
 		pre_compile;;
 esac
