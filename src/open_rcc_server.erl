@@ -5,7 +5,7 @@
 -behaviour(gen_server).
 
 %Start Function
--export([start_link/1]).
+-export([start_link/1, mochiweb_loop/1]).
 
 %Gen_Server API
 -export([
@@ -33,6 +33,8 @@
 %% HTTP routines and Responses
 -define(CONTENT_HTML, [{"Content-Type", "text/html"}]).
 -define(RESP_MISSED_USERNAME, {400, ?CONTENT_HTML, << "Please define username parameter" >>}).
+-define(RESP_NOTLOGGED_USER, {400, ?CONTENT_HTML, <<"User is not logged in">>}).
+-define(RESP_SUCCESS, {200, ?CONTENT_HTML, <<"Success.">>}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%% Gen_Server Stuff %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -46,7 +48,8 @@ init([Port]) ->
     {ok, #state{}}.
 
 handle_call({Resource, Req}, _From, State) ->
-    handle_request(Resource, Req),
+    QueryString = Req:parse_qs(),
+    handle_request(Resource, QueryString, Req),
     {reply, ok, State}.
 
 %% We need these to crash the process early if we starts using gen_cast&gen_info
@@ -75,7 +78,7 @@ start_mochiweb(Port) ->
     %% We need to do start_link there to link Mochiweb process into Supervision tree
     %% This process will die if Mochiweb process dies. 
     %% Thus Supervisor has an opportunity to restar boths. 
-    mochiweb_http:start_link([{port, Port}, {loop, {?MODULE, fun mochiweb_loop/1}}]).
+    mochiweb_http:start_link([{port, Port}, {loop, {?MODULE, mochiweb_loop}}]).
 
 mochiweb_loop(Req) ->
     ?DEBUG("Start handeling of Request ~p", [Req]),
@@ -84,7 +87,8 @@ mochiweb_loop(Req) ->
                    0 -> Path;
                    N -> string:substr(Path, 1, length(Path) - (N + 1))
                end,
-    handle_request(Resource, Req).
+    QueryString = Req:parse_qs(),
+    handle_request(Resource, QueryString, Req).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% REST API %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -123,19 +127,19 @@ mochiweb_loop(Req) ->
 %%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(io_lib:format("~p", [ReleaseData]))})
 %%     end;
 
-handle_request("/agents", Req) ->
+handle_request("/agents", _QueryString, Req) ->
     Data = cpx:get_agents(),
     Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(lists:flatten(io_lib:format("~p", [Data])))});
 
-handle_request("/clients", Req) ->
+handle_request("/clients", _QueryString, Req) ->
     Data = call_queue_config:get_clients(),
     Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(lists:flatten(io_lib:format("~p", [Data])))});
 
-handle_request("/queues", Req) ->
+handle_request("/queues", _QueryString, Req) ->
     Data = call_queue_config:get_queues(),
     Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(lists:flatten(io_lib:format("~p", [Data])))});
 
-handle_request("/ringtest/" ++ Agent, Req) ->
+handle_request("/ringtest/" ++ Agent, _QueryString, Req) ->
     AgentPid = cpx:get_agent(Agent),
     AgentRec = agent:dump_state(AgentPid),
     Callrec = #call{id = "unused", source = self(), callerid= {"Echo test", "0000000"}},
@@ -148,10 +152,10 @@ handle_request("/ringtest/" ++ Agent, Req) ->
 
 %freeswitch_media_manager:make_outbound_call("DCF", cpx:get_agent("742"), agent:dump_state(cpx:get_agent("742")#agent.login)
 
-handle_request("/init_outbound/" ++ _Rest, Req) ->
+handle_request("/init_outbound/" ++ _Rest, _QueryString, Req) ->
     Req:respond({200, [{"Content-Type", "text/html"}], <<"NYI.">>});
 
-handle_request("/dial" ++ _Rest, Req) ->
+handle_request("/dial" ++ _Rest, _QueryString, Req) ->
     Req:respond({200, [{"Content-Type", "text/html"}], <<"NYI.">>});
 
 
@@ -235,79 +239,57 @@ handle_request("/dial" ++ _Rest, Req) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_request("/spy" ++ _Rest, Req) ->
+handle_request("/spy" ++ _Rest, _QueryString, Req) ->
     Req:respond({200, [{"Content-Type", "text/html"}], <<"NYI.">>});
     
-handle_request("/hangup" ++ _Rest, Req) ->
+handle_request("/hangup" ++ _Rest, _QueryString, Req) ->
     Req:respond({200, [{"Content-Type", "text/html"}], <<"NYI.">>});
 
-handle_request("/transfer" ++ _Rest, Req) ->
+handle_request("/transfer" ++ _Rest, _QueryString, Req) ->
     Req:respond({200, [{"Content-Type", "text/html"}], <<"NYI.">>});
 
-handle_request("/login" ++ _Rest, Req) ->
-    QueryString = Req:parse_qs(),
+handle_request("/login" ++ _Rest, QueryString, Req) ->
     User = ?GET_USERNAME(QueryString),
     Password = proplists:get_value("password", QueryString),
-    Respond = find_agent_and_apply(User, fun handle_login/3, 
-                                   {Password, parse_endpoint(QueryString)}),                                                     
+    Respond = handle_login(agent_manager:query_agent(User), User, 
+                           {Password, parse_endpoint(User, QueryString)}),
     Req:respond(Respond);
 
-handle_request("/logout" ++ _Rest, Req) ->
-    QueryString=Req:parse_qs(),
-    Respond=find_agent_and_apply(?GET_USERNAME(QueryString), fun handle_logout/3, []),                   
+handle_request("/logout" ++ _Rest, QueryString, Req) ->
+    Respond = find_agent_and_apply(?GET_USERNAME(QueryString), fun handle_logout/3, []),                   
     Req:respond(Respond);
 
-%% handle_request("/set_avail" ++ _Rest, Req) ->
-%%     QueryStringData = Req:parse_qs(),
-%%     UserName = proplists:get_value("username", QueryStringData, ""),
-    
-%%     case cpx:get_agent(UserName) of
-%%         none -> 
-%%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary("Agent not logged in.")});
-%%         Pid ->
-%%             agent:set_release(Pid, none),
-%%             Agent = agent:dump_state(Pid),
-%%             agent_manager:set_avail(UserName, Agent#agent.all_channels),
-%%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary("Success.")})
-%%     end;
+handle_request("/set_avail" ++ _Rest, QueryString, Req) ->
+    Respond = find_agent_and_apply(?GET_USERNAME(QueryString), 
+                                   fun(Pid, _UserName, _Args) ->
+                                           agent:set_state(Pid, idle),
+                                           ?RESP_SUCCESS end, []),
+    Req:respond(Respond);
 
-handle_request("/set_released" ++ _Rest, Req) ->
-    QueryStringData = Req:parse_qs(),
-    UserName = proplists:get_value("username", QueryStringData, ""),
-    Id = proplists:get_value("id", QueryStringData, not_provided),
-    Label = proplists:get_value("label", QueryStringData, not_provided),
-    Bias = proplists:get_value("bias", QueryStringData, not_provided),
-    
-    case {Id, Label, Bias} of
-        {not_provided, _, _} ->
-            Provided = false;
-        { _, not_provided, _} ->
-            Provided = false;
-        {_, _, not_provided} ->
-            Provided = false;
-        _ ->
-            Provided = true
-    end,
+handle_request("/set_released" ++ _Rest, QueryString, Req) ->
+    Reason = get_released_reason(QueryString),
+    Respond = find_agent_and_apply(?GET_USERNAME(QueryString),
+                                   fun(Pid, _UserName, _Reason) ->
+                                           agent:set_state(Pid, Reason),
+                                           ?RESP_SUCCESS end, Reason),
+    Req:respond(Respond);
 
-    case Provided of
-        true ->
-            case cpx:get_agent(UserName) of
-                none -> 
-                    Req:respond({200, ?CONTENT_HTML, list_to_binary("Agent not logged in.")});
-                Pid ->
-                    agent:set_release(Pid, {Id, Label, erlang:list_to_integer(Bias)}),
-                    Req:respond({200, ?CONTENT_HTML, list_to_binary("Success.")})
-            end;
-        false -> 
-            case cpx:get_agent(UserName) of
-                none -> 
-                    Req:respond({200, ?CONTENT_HTML, list_to_binary("Agent not logged in.")});
-                Pid ->
-                    agent:set_release(Pid, default),
-                    Req:respond({200, ?CONTENT_HTML, list_to_binary("Success.")})
-            end
-    end.
-            
+handle_request("/hang_up" ++ _Rest, QueryString, Req) ->
+    Respond = find_agent_and_apply(?GET_USERNAME(QueryString),
+                                   fun(Pid, _UserName, _Args) ->
+                                           agent:set_state(Pid, wrapup),
+                                           ?RESP_SUCCESS end, []),
+    Req:respond(Respond);
+
+handle_request("/end_wrapup" ++ _Rest, QueryString, Req) ->
+    Respond = find_agent_and_apply(?GET_USERNAME(QueryString),
+                                   fun(Pid, _UserName, _Args) ->
+                                           agent:set_state(Pid, idle),
+                                           ?RESP_SUCCESS end, []),
+    Req:respond(Respond);
+    
+handle_request(_Path, _QueryString, Req) ->
+    Req:respond({404, ?CONTENT_HTML, <<"Not Found">>}).
 
 %% handle_request("/end_wrapup" ++ _Rest, Req) ->
 %%     QueryStringData = Req:parse_qs(),
@@ -358,15 +340,28 @@ handle_request("/set_released" ++ _Rest, Req) ->
 %%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(io_lib:format("~p",[ChannelID]))})
 %%     end;
 
-handle_logout(none, UserName, _Args) ->
-    {200, ?CONTENT_HTML, list_to_binary(io_lib:format("~p was not logged in", [UserName]))};
-handle_logout({ok, Pid}, _User, _Args) ->
+get_released_reason(QueryString) ->
+    Id = proplists:get_value("id", QueryString),
+    Label = proplists:get_value("label", QueryString),
+    Bias = proplists:get_value("bias", QueryString),
+    get_released_reason(Id, Label, Bias).
+
+get_released_reason(undefined, _, _) ->
+    {released, default};
+get_released_reason(_, undefined, _) ->
+    {released, default};
+get_released_reason(_, _, undefined) ->
+    {released, default};
+get_released_reason(Id, Label, Bias) ->
+    {released, {Id, Label, list_to_integer(Bias)}}.
+
+handle_logout(Pid, _User, _Args) when is_pid(Pid) ->
     agent:stop(Pid),
     {200, ?CONTENT_HTML, << "Success" >>}.
 
-handle_login(none, UserName, {Password, Endpoint}) ->
+handle_login(false, UserName, {Password, Endpoint}) ->
     agent_login(UserName, Password, Endpoint);
-handle_login({ok, Pid}, UserName, _Args) ->
+handle_login(Pid, UserName, _Args) ->
     {200, ?CONTENT_HTML, list_to_binary(
                            io_lib:format("~p is already logged in. Pid=~p", [UserName, Pid])
                           )}.
@@ -374,13 +369,13 @@ handle_login({ok, Pid}, UserName, _Args) ->
 agent_login(UserName, Password, {EndpointType, EndpointData}) ->
     case agent_auth:auth(UserName, Password) of
         {allow, Id, Skills, Security, Profile} ->
-                     Agent = #agent{
-                         id = Id, 
-                         login = UserName, 
-                         skills = Skills, 
-                         profile=Profile, 
-                       security_level = Security
-                      },
+            Agent = #agent{
+              id = Id, 
+              login = UserName, 
+              skills = Skills, 
+              profile=Profile, 
+              security_level = Security
+             },
             {ok, Pid} = agent_manager:start_agent(Agent),
             agent:set_endpoint(Pid, EndpointType, EndpointData),
             {200, ?CONTENT_HTML, << "Success" >>};
@@ -388,9 +383,10 @@ agent_login(UserName, Password, {EndpointType, EndpointData}) ->
             {403, ?CONTENT_HTML, << "Agent is not found or invalid password" >>}
     end.
 
-parse_endpoint(QueryString) ->
+parse_endpoint(UserName, QueryString) ->
+    %% TODO - Need to be verified with different types.
     EndpointType = proplists:get_value(endpointtype, QueryString, sip_registration),
-    EndpointData = proplists:get_value(endpointdata, QueryString, ""),
+    EndpointData = proplists:get_value(endpointdata, QueryString, UserName),
     {EndpointType, EndpointData}.
 
 find_agent_and_apply(undefined, _Function, _Args) ->
@@ -398,7 +394,7 @@ find_agent_and_apply(undefined, _Function, _Args) ->
 find_agent_and_apply(UserName, Function, Args) ->
     case agent_manager:query_agent(UserName) of 
         false ->
-            Function(none, UserName, Args);
+            ?RESP_NOTLOGGED_USER;
         {true, Pid} ->
-            Function({ok, Pid}, UserName, Args)
+            Function(Pid, UserName, Args)
     end.
