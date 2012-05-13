@@ -5,10 +5,8 @@
 	{applications, [
 		kernel,
 		stdlib,
-		'OpenACD',
-		amqp_client,
-		rabbit_common
+		'OpenACD'
 	]},
-	{mod, { open_rcc, []}},
+	{mod, {open_rcc_app, []}},
 	{env, []}
 ]}.
