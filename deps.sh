@@ -43,8 +43,6 @@ function pre_compile {
 		mkdir priv
 	fi
 
-	make -C contrib/rabbitmq-erlang-client
-
 	# hack for reltool
 	if [ ! -d open_rcc ]; then
 		mkdir open_rcc
