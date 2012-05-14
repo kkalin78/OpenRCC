@@ -19,7 +19,9 @@
          set_endpoint/2,
          set_state/2,
          set_state/3,
-         stop/1
+         stop/1,
+         queue_transfer/2,
+         agent_transfer/2
         ]).
 
 %% gen_fsm callbacks
@@ -60,6 +62,12 @@ set_state(Pid, Statename, Statedata) ->
 stop(Pid) ->
     gen_server:cast(Pid, stop).
 
+queue_transfer(Pid, QueueName) ->
+    gen_server:call(Pid, {queue_transfer, QueueName}).
+
+agent_transfer(Pid, Transferee) ->
+    gen_server:call(Pid, {agent_transfer, Transferee}).
+
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -95,6 +103,19 @@ handle_call({set_state, {Statename, Statedata}}, From, State) when is_list(State
     handle_call({set_state, agent:list_to_state(Statename), Statedata}, From, State);
 handle_call({set_state, {Statename, Statedata}}, _From, #state{agent_pid=Pid}=State) when is_atom(Statename) ->
     Reply = agent:set_state(Pid, Statename, Statedata),
+    {reply, Reply, State};
+
+handle_call({queue_transfer, QueueName}, _From, #state{agent_pid=Pid}=State) when is_list(QueueName) ->
+    Reply = agent:queue_transfer(Pid, QueueName),
+    {reply, Reply, State};
+
+handle_call({agent_transfer, Transferee}, _From, #state{agent_pid=Pid}=State) when is_list(Transferee) ->
+    case agent_manager:query_agent(Transferee) of
+        {true, Target} ->
+            Reply = agent:agent_transfer(Pid, Target);
+        false ->
+            Reply = invalid
+    end,
     {reply, Reply, State}.
 
 terminate(_Reason, _State) ->

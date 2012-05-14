@@ -257,36 +257,40 @@ handle_request("/login" ++ _Rest, QueryString, Req) ->
     Req:respond(Respond);
 
 handle_request("/logout" ++ _Rest, QueryString, Req) ->
-    Respond = find_agent_and_apply(?GET_USERNAME(QueryString), fun handle_logout/3, []),                   
+    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), stop, []),                   
     Req:respond(Respond);
 
 handle_request("/set_avail" ++ _Rest, QueryString, Req) ->
-    Respond = find_agent_and_apply(?GET_USERNAME(QueryString), 
-                                   fun(Pid, _UserName, _Args) ->
-                                           ?RESP_SUCCESS_PARAM(agent_connection:set_state(Pid, idle))
-                                           end, []),
+    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), set_state, [idle]),
     Req:respond(Respond);
 
 handle_request("/set_released" ++ _Rest, QueryString, Req) ->
     Reason = get_released_reason(QueryString),
-    Respond = find_agent_and_apply(?GET_USERNAME(QueryString),
-                                   fun(Pid, _UserName, _Reason) ->
-                                           ?RESP_SUCCESS_PARAM(agent_connection:set_state(Pid, Reason))
-                                           end, Reason),
+    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), set_state, [Reason]),
     Req:respond(Respond);
 
 handle_request("/hang_up" ++ _Rest, QueryString, Req) ->
-    Respond = find_agent_and_apply(?GET_USERNAME(QueryString),
-                                   fun(Pid, _UserName, _Args) ->
-                                           ?RESP_SUCCESS_PARAM(agent_connection:set_state(Pid, wrapup))
-                                           end, []),
+    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), set_state, [wrapup]),
     Req:respond(Respond);
 
 handle_request("/end_wrapup" ++ _Rest, QueryString, Req) ->
-    Respond = find_agent_and_apply(?GET_USERNAME(QueryString),
-                                   fun(Pid, _UserName, _Args) ->
-                                           ?RESP_SUCCESS_PARAM(agent_connection:set_state(Pid, idle))
-                                           end, []),
+    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), set_state, [idle]),
+    Req:respond(Respond);
+
+handle_request("/queue_transfer" ++ _Rest, QueryString, Req) ->
+    QueueName = proplists:get_value("queue", QueryString, "default_queue"),
+    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), queue_transfer, [QueueName]),
+    Req:respond(Respond);
+
+handle_request("/agent_transfer" ++ _Rest, QueryString, Req) ->
+    TransferTo = proplists:get_value("agent", QueryString),
+    User = ?GET_USERNAME(QueryString),
+    case TransferTo of
+        User ->
+            Respond = {403, ?CONTENT_HTML, <<"Cannot transfer a call to self">>};
+        _Else ->
+            Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), agent_transfer, [TransferTo])
+    end,
     Req:respond(Respond);
     
 handle_request(_Path, _QueryString, Req) ->
@@ -341,6 +345,12 @@ handle_request(_Path, _QueryString, Req) ->
 %%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(io_lib:format("~p",[ChannelID]))})
 %%     end;
 
+parse_endpoint(UserName, QueryString) ->
+    %% TODO - Need to be verified with different types.
+    EndpointType = proplists:get_value(endpointtype, QueryString, sip_registration),
+    EndpointData = proplists:get_value(endpointdata, QueryString, UserName),
+    {EndpointType, EndpointData}.
+
 get_released_reason(QueryString) ->
     Id = proplists:get_value("id", QueryString),
     Label = proplists:get_value("label", QueryString),
@@ -356,18 +366,7 @@ get_released_reason(_, _, undefined) ->
 get_released_reason(Id, Label, Bias) ->
     {released, {Id, Label, list_to_integer(Bias)}}.
 
-handle_logout(Pid, _User, _Args) when is_pid(Pid) ->
-    agent_connection:stop(Pid),
-    {200, ?CONTENT_HTML, << "Success" >>}.
-
 handle_login(false, UserName, {Password, Endpoint}) ->
-    agent_login(UserName, Password, Endpoint);
-handle_login(Pid, UserName, _Args) ->
-    {200, ?CONTENT_HTML, list_to_binary(
-                           io_lib:format("~p is already logged in. Pid=~p", [UserName, Pid])
-                          )}.
-
-agent_login(UserName, Password, Endpoint) ->
     case agent_auth:auth(UserName, Password) of
         {allow, Id, Skills, Security, Profile} ->
             Agent = #agent{
@@ -382,22 +381,23 @@ agent_login(UserName, Password, Endpoint) ->
             {200, ?CONTENT_HTML, << "Success" >>};
         deny ->
             {403, ?CONTENT_HTML, << "Agent is not found or invalid password" >>}
-    end.
+    end;
+handle_login(Pid, UserName, _Args) ->
+    {200, ?CONTENT_HTML, list_to_binary(
+                           io_lib:format("~p is already logged in. Pid=~p", [UserName, Pid])
+                          )}.
 
-parse_endpoint(UserName, QueryString) ->
-    %% TODO - Need to be verified with different types.
-    EndpointType = proplists:get_value(endpointtype, QueryString, sip_registration),
-    EndpointData = proplists:get_value(endpointdata, QueryString, UserName),
-    {EndpointType, EndpointData}.
-
-find_agent_and_apply(undefined, _Function, _Args) ->
+find_agent_and_apply2(undefined, _Function, _Args) ->
     ?RESP_MISSED_USERNAME;
-find_agent_and_apply(UserName, Function, Args) ->
-    case agent_manager:query_agent(UserName) of 
+find_agent_and_apply2(User, Function, Args) ->
+    case agent_manager:query_agent(User) of 
         false ->
             ?RESP_NOTLOGGED_USER;
         {true, Pid} ->
             % Ugly code, but it's easiest way to do it for now
             #agent{connection=CPid} = agent:dump_state(Pid),
-            Function(CPid, UserName, Args)
+            Res = erlang:apply(agent_connection, 
+                               Function, [CPid | Args]),
+            ?RESP_SUCCESS_PARAM(Res)
     end.
+
