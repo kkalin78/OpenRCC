@@ -28,7 +28,7 @@
 
 -define(SERVER, ?MODULE).
 
--define(GET_USERNAME(QueryString), proplists:get_value("username", QueryString)).
+-define(GET_USERNAME(QueryString), proplists:get_value("username", QueryString, "")).
 
 %% HTTP routines and Responses
 -define(CONTENT_HTML, [{"Content-Type", "text/html"}]).
@@ -240,15 +240,44 @@ handle_request("/dial" ++ _Rest, _QueryString, Req) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_request("/spy" ++ _Rest, _QueryString, Req) ->
-    Req:respond({200, [{"Content-Type", "text/html"}], <<"NYI.">>});
-    
-handle_request("/hangup" ++ _Rest, _QueryString, Req) ->
-    Req:respond({200, [{"Content-Type", "text/html"}], <<"NYI.">>});
+%%--------------------------------------------------------------------
+%% @doc
+%% Executes silent monitoring of Agent's call. 
+%%     HTTP request - <server:port>/spy?spy=<spy name>&target=<target name>
+%%          <spy name> is an agent name who will be a listener/spy
+%%          <target name> is an agent name who is going to be monitored.
+%%     The method can return: 
+%%          400 Bad request - Spy or Target agents are not logged in
+%%          200 OK - Agents are there and the request has been executed.  
+%%                   Actual result of the execution is on HTTP response body
+%% @end
+%%--------------------------------------------------------------------
+handle_request("/spy" ++ _Rest, QueryString, Req) ->
+    Spy = proplists:get_value("spy", QueryString, ""),
+    Target = proplists:get_value("target", QueryString, ""),
+    case {agent_manager:query_agent(Spy), agent_manager:query_agent(Target)} of
+        {false, _} ->
+            Req:respond({400, ?CONTENT_HTML, << "Spy agent is not logged in" >>});
+        {_, false} ->
+            Req:respond({400, ?CONTENT_HTML, << "Target agent is not logged in" >>});
+        {false, false} ->
+            Req:respond({400, ?CONTENT_HTML, << "Spy and Target agents are not logged in" >>});
+        {{true, SpyPid}, {true, TargetPid}} ->
+            Req:respond(?RESP_SUCCESS_PARAM(agent:spy(SpyPid, TargetPid)))
+    end;
 
-handle_request("/transfer" ++ _Rest, _QueryString, Req) ->
-    Req:respond({200, [{"Content-Type", "text/html"}], <<"NYI.">>});
-
+%%--------------------------------------------------------------------
+%% @doc
+%% Login an agent in OpenACD. The agent will be unavaible state.
+%%     HTTP request - <server:port>/login?username=<agent name>&password=<password>
+%%         <agent name> - is an agent name.
+%%         <password> - is password in plain text (Unsecured).
+%%     The method can return:
+%%         400 Bad request - the request doesn't have username parameter
+%%         403 Forbidden - Invalid agent name or password
+%%         200 OK - Agent has been logged in
+%% @end
+%%--------------------------------------------------------------------
 handle_request("/login" ++ _Rest, QueryString, Req) ->
     User = ?GET_USERNAME(QueryString),
     Password = proplists:get_value("password", QueryString),
@@ -256,32 +285,105 @@ handle_request("/login" ++ _Rest, QueryString, Req) ->
                            {Password, parse_endpoint(User, QueryString)}),
     Req:respond(Respond);
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Logout an agent from OpenACD.
+%%    HTTP request - <server:port>/logout?username=<agent name>
+%%        <agent name> - is an agent name.
+%%    The method can return:
+%%        400 Bad request - the request doesn't have username parameter
+%%        200 OK - Agent has been logged out 
+%% @end
+%%--------------------------------------------------------------------
 handle_request("/logout" ++ _Rest, QueryString, Req) ->
     Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), stop, []),                   
     Req:respond(Respond);
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Make an agent avaiable for calls.
+%%    HTTP request - <server:port>/set_avail?username=<agent name>
+%%        <agent name> - is an agent name.
+%%    The method can return:
+%%        400 Bad request - the request doesn't have username parameter
+%%        200 OK - The request is executed. Actual result is in HTTP response body
+%% @end
+%%--------------------------------------------------------------------
 handle_request("/set_avail" ++ _Rest, QueryString, Req) ->
     Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), set_state, [idle]),
     Req:respond(Respond);
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Make an agent unavaiable for calls.
+%%    HTTP request - <server:port>/set_released?username=<agent name>
+%%        <agent name> - is an agent name.
+%%    The method can return:
+%%        400 Bad request - the request doesn't have username parameter
+%%        200 OK - The request is executed. Actual result is in HTTP response body
+%% @end
+%%--------------------------------------------------------------------
 handle_request("/set_released" ++ _Rest, QueryString, Req) ->
     Reason = get_released_reason(QueryString),
     Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), set_state, [Reason]),
     Req:respond(Respond);
 
-handle_request("/hang_up" ++ _Rest, QueryString, Req) ->
+%%--------------------------------------------------------------------
+%% @doc
+%% End current call on agent and put the agent into wrapup state
+%%    HTTP request - <server:port>/hangup?username=<agent name>
+%%        <agent name> - is an agent name who owns the call to be dropped
+%%    The method can return:
+%%        400 Bad request - the request doesn't have username parameter
+%%        200 OK - The request is executed. Actual result is in HTTP response body
+%% @end
+%%--------------------------------------------------------------------
+handle_request("/hangup" ++ _Rest, QueryString, Req) ->
     Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), set_state, [wrapup]),
     Req:respond(Respond);
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Make an agent avaiable for calls after call work.
+%%    HTTP request - <server:port>/hangup?username=<agent name>
+%%        <agent name> - is an agent name.
+%%    The method can return:
+%%        400 Bad request - the request doesn't have username parameter
+%%        200 OK - The request is executed. Actual result is in HTTP response body
+%% @end
+%%--------------------------------------------------------------------
 handle_request("/end_wrapup" ++ _Rest, QueryString, Req) ->
     Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), set_state, [idle]),
     Req:respond(Respond);
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Transfer a call from an agent to a queue. The agent will be put in wrapup state
+%%    HTTP request - <server:port>/hangup?username=<agent name>&queue=<queue name>
+%%        <agent name> - is an agent name who owns the call
+%%        <queue name> - is a queue name where the call will be transfered.
+%%    The method can return:
+%%        400 Bad request - the request doesn't have username parameter
+%%        200 OK - The request is executed. Actual result is in HTTP response body
+%% @end
+%%--------------------------------------------------------------------
 handle_request("/queue_transfer" ++ _Rest, QueryString, Req) ->
     QueueName = proplists:get_value("queue", QueryString, "default_queue"),
     Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), queue_transfer, [QueueName]),
     Req:respond(Respond);
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Transfer a call from one agent to another one.
+%%    HTTP request - <server:port>/hangup?username=<agent name>&agent=<target agent>
+%%        <agent name> - is an agent name whom owns the call
+%%        <target agent> - is an agent name where the call will be transfered.
+%%    The method can return:
+%%        400 Bad request - the request doesn't have username parameter.
+%%        403 Forbidden - The request is correct but username and agent parameters are equal
+%%        200 OK - The request is executed. Actual result is in HTTP response body
+%% @end
+%%--------------------------------------------------------------------
 handle_request("/agent_transfer" ++ _Rest, QueryString, Req) ->
     TransferTo = proplists:get_value("agent", QueryString),
     User = ?GET_USERNAME(QueryString),
@@ -292,29 +394,29 @@ handle_request("/agent_transfer" ++ _Rest, QueryString, Req) ->
             Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), agent_transfer, [TransferTo])
     end,
     Req:respond(Respond);
-    
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Request information about agent's state
+%%    HTTP request - <server:port>/get_call_state?username=<agent name>
+%%        <agent name> - is an agent name
+%%    The method can return:
+%%        400 Bad request - the request doesn't have username parameter.
+%%        200 OK - The request is executed. Actual result is in HTTP response body
+%% @end
+%%--------------------------------------------------------------------    
+handle_request("/get_call_state", QueryString, Req) ->
+    case agent_manager:query_agent(?GET_USERNAME(QueryString)) of
+        false ->
+            Respond = ?RESP_NOTLOGGED_USER;
+        {true, Pid} ->
+            AgentState = agent:dump_state(Pid),
+            Respond = {200, ?CONTENT_HTML, list_to_binary(io_lib:format("~p", [AgentState#agent.state]))}
+    end,
+    Req:respond(Respond);
+
 handle_request(_Path, _QueryString, Req) ->
     Req:respond({404, ?CONTENT_HTML, <<"Not Found">>}).
-
-%% handle_request("/end_wrapup" ++ _Rest, Req) ->
-%%     QueryStringData = Req:parse_qs(),
-%%     UserName = proplists:get_value("username", QueryStringData, ""),
-    
-%%     case cpx:get_agent(UserName) of
-%%         none -> 
-%%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary("Agent not logged in.")});
-%%         Pid ->
-%%             Agent = agent:dump_state(Pid),
-%%             #agent{used_channels = Channels} = Agent,
-
-%%             case dict:fetch_keys(Channels) of
-%%                 [ChannelID] ->
-%%                     agent_channel:end_wrapup(ChannelID),
-%%                     Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary("Success.")});
-%%                 Else ->
-%%                     Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary("Failure.")})
-%%             end
-%%     end;
 
 %% handle_request("/get_channels" ++ _Rest, Req) ->
 %%     QueryStringData = Req:parse_qs(),
@@ -344,6 +446,10 @@ handle_request(_Path, _QueryString, Req) ->
 %%             [ChannelID] = dict:fetch_keys(Channels),
 %%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(io_lib:format("~p",[ChannelID]))})
 %%     end;
+
+%%%===================================================================
+%%% Internal functions
+%%%===================================================================
 
 parse_endpoint(UserName, QueryString) ->
     %% TODO - Need to be verified with different types.
@@ -387,7 +493,7 @@ handle_login(Pid, UserName, _Args) ->
                            io_lib:format("~p is already logged in. Pid=~p", [UserName, Pid])
                           )}.
 
-find_agent_and_apply2(undefined, _Function, _Args) ->
+find_agent_and_apply2("", _Function, _Args) ->
     ?RESP_MISSED_USERNAME;
 find_agent_and_apply2(User, Function, Args) ->
     case agent_manager:query_agent(User) of 
