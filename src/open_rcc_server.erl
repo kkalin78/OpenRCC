@@ -405,7 +405,7 @@ handle_request("/agent_transfer" ++ _Rest, QueryString, Req) ->
 %%        200 OK - The request is executed. Actual result is in HTTP response body
 %% @end
 %%--------------------------------------------------------------------    
-handle_request("/get_call_state", QueryString, Req) ->
+handle_request("/get_call_state" ++ _Rest, QueryString, Req) ->
     case agent_manager:query_agent(?GET_USERNAME(QueryString)) of
         false ->
             Respond = ?RESP_NOTLOGGED_USER;
@@ -413,6 +413,21 @@ handle_request("/get_call_state", QueryString, Req) ->
             AgentState = agent:dump_state(Pid),
             Respond = {200, ?CONTENT_HTML, list_to_binary(io_lib:format("~p", [AgentState#agent.state]))}
     end,
+    Req:respond(Respond);
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Put agent's call to hold/unhold state
+%%    HTTP request - <server:port>/toggle_hold?username=<agent name>
+%%        <agent name> - is an agent name
+%%    The method can return:
+%%        400 Bad request - the request doesn't have username parameter.
+%%        200 OK - The request is executed. Actual result is in HTTP response body
+%% @end
+%%--------------------------------------------------------------------  
+handle_request("/toggle_hold" ++ _Rest, QueryString, Req) ->
+    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), 
+                                    media_command, [{cast, <<"toggle_hold">>, []}]),
     Req:respond(Respond);
 
 handle_request(_Path, _QueryString, Req) ->

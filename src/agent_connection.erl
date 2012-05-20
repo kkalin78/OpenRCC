@@ -12,6 +12,8 @@
 -behaviour(gen_server).
 
 -include_lib("OpenACD/include/log.hrl").
+-include_lib("OpenACD/include/call.hrl").
+-include_lib("OpenACD/include/agent.hrl").
 
 %% API
 -export([
@@ -21,7 +23,8 @@
          set_state/3,
          stop/1,
          queue_transfer/2,
-         agent_transfer/2
+         agent_transfer/2,
+         media_command/2
         ]).
 
 %% gen_fsm callbacks
@@ -62,11 +65,17 @@ set_state(Pid, Statename, Statedata) ->
 stop(Pid) ->
     gen_server:cast(Pid, stop).
 
+-spec queue_transfer(pid(), string()) -> any().
 queue_transfer(Pid, QueueName) ->
     gen_server:call(Pid, {queue_transfer, QueueName}).
 
+-spec agent_transfer(pid(), string()) -> any().
 agent_transfer(Pid, Transferee) ->
     gen_server:call(Pid, {agent_transfer, Transferee}).
+
+-spec media_command(pid(), tuple()) -> any().
+media_command(Pid, Command) ->
+    gen_server:call(Pid, {media_cmd, Command}).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -116,7 +125,25 @@ handle_call({agent_transfer, Transferee}, _From, #state{agent_pid=Pid}=State) wh
         false ->
             Reply = invalid
     end,
-    {reply, Reply, State}.
+    {reply, Reply, State};
+
+handle_call({media_cmd, {call, Cmd, Args}}, _From, #state{agent_pid=Pid}=State) ->
+    case agent:dump_state(Pid) of 
+        #agent{statedata=Call} when is_record(Call, call) ->
+            {reply, gen_medial:call(Call#call.source, {Cmd, Args}), State};
+        _Else ->
+            {reply, invalid, State}
+    end;
+
+handle_call({media_cmd, {cast, Cmd, Args}}, _From, #state{agent_pid=Pid}=State) ->
+    #agent{statedata=Call} = agent:dump_state(Pid),
+    case agent:dump_state(Pid) of
+        #agent{statedata=Call} when is_record(Call, call) ->
+            gen_media:cast(Call#call.source, {Cmd, Args}),
+            {reply, ok, State};
+        _Else ->
+            {reply, invalid, State}
+    end.
 
 terminate(_Reason, _State) ->
     ok.
