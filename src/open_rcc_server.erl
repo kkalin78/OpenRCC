@@ -28,17 +28,10 @@
 
 -define(SERVER, ?MODULE).
 
--define(GET_USERNAME(QueryString), proplists:get_value("username", QueryString, "")).
-
 %% HTTP routines and Responses
--define(CONTENT_HTML, [{"Content-Type", "text/html"}]).
 -define(CONTENT_JSON, [{"Content-Type", "application/json"}]).
 -define(RESP_AGENT_NOT_LOGGED, {200, ?CONTENT_JSON, encode_response(<<"false">>, <<"Agent is not logged in">>)}).
 -define(RESP_SUCCESS, {200, ?CONTENT_JSON, encode_response(<<"true">>)}).
-
--define(RESP_MISSED_USERNAME, {400, ?CONTENT_HTML, << "Please define username parameter" >>}).
--define(RESP_NOTLOGGED_USER, {400, ?CONTENT_HTML, <<"User is not logged in">>}).
--define(RESP_SUCCESS_PARAM(RES), {200, ?CONTENT_HTML, atom_to_binary(RES, latin1)}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%% Gen_Server Stuff %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -326,13 +319,6 @@ handle_request("/get_release_state" ++ _Rest, QueryString, Req) ->
         Pid ->
             AgentState = agent:dump_state(Pid),
             case AgentState#agent.statedata of 
-                {Id, default, Bias} ->
-                    JSON = encode_response(<<"true">>, 
-                                           [
-                                            {<<"id">>, to_binary(Id)},
-                                            {<<"label">>, <<"default">>},
-                                            {<<"bias">>, to_binary(Bias)}
-                                            ]);
                 {Id, Label, Bias} ->
                     JSON = encode_response(<<"true">>, 
                                            [
@@ -513,7 +499,7 @@ handle_request("/toggle_hold" ++ _Rest, QueryString, Req) ->
     end;
 
 handle_request(_Path, _QueryString, Req) ->
-    Req:respond({404, ?CONTENT_HTML, <<"Not Found">>}).
+    Req:respond({404, [{"Content-Type", "text/html"}], <<"Not Found">>}).
 
 %%%===================================================================
 %%% Internal functions
