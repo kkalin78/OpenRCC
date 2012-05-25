@@ -18,7 +18,9 @@
 %% API
 -export([
          start/1,
+         get_agentpid/1,
          set_endpoint/2,
+         set_endpoint/3,
          set_state/2,
          set_state/3,
          stop/1,
@@ -49,9 +51,17 @@
 start(Agent) ->
     gen_server:start(?MODULE, [Agent], []).
 
+-spec get_agentpid(pid()) -> pid().
+get_agentpid(Pid) ->
+    gen_server:call(Pid, get_agentpid).
+
 -spec set_endpoint(pid(), {_, _}) -> any().
 set_endpoint(Pid, Endpoint) ->
     gen_server:call(Pid, {set_endpoint, Endpoint}).
+
+-spec set_endpoint(pid(), {atom(), list()}, atom()) -> any().
+set_endpoint(Pid, Endpoint, Persistantness) ->
+    gen_server:call(Pid, {set_endpoint, Endpoint, Persistantness}).
 
 -spec set_state(pid(), string() | atom()) -> any().
 set_state(Pid, Statename) ->
@@ -98,8 +108,14 @@ handle_info(Msg, State) ->
     ?DEBUG("Got info message ~p; State=~p. Ignoring...", [Msg, State]),
     {noreply, State}.
 
+handle_call(get_agentpid, _From, #state{agent_pid=Pid}=State) ->
+    {reply, Pid, State};
+
 handle_call({set_endpoint, {EndpointType, EndpointData}}, _From, #state{agent_pid=Pid}=State) ->
     Reply = agent:set_endpoint(Pid, EndpointType, EndpointData),
+    {reply, Reply, State};
+handle_call({set_endpoint, {EndpointType, EndpointData}, Persistantness}, _From, #state{agent_pid=Pid}=State)->
+    Reply = agent:set_endpoint(Pid, EndpointType, EndpointData, Persistantness),
     {reply, Reply, State};
 
 handle_call({set_state, Statename}, From, State) when is_list(Statename) ->

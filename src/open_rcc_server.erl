@@ -32,9 +32,12 @@
 
 %% HTTP routines and Responses
 -define(CONTENT_HTML, [{"Content-Type", "text/html"}]).
+-define(CONTENT_JSON, [{"Content-Type", "application/json"}]).
+-define(RESP_AGENT_NOT_LOGGED, {200, ?CONTENT_JSON, encode_response(<<"false">>, <<"Agent is not logged in">>)}).
+-define(RESP_SUCCESS, {200, ?CONTENT_JSON, encode_response(<<"true">>)}).
+
 -define(RESP_MISSED_USERNAME, {400, ?CONTENT_HTML, << "Please define username parameter" >>}).
 -define(RESP_NOTLOGGED_USER, {400, ?CONTENT_HTML, <<"User is not logged in">>}).
--define(RESP_SUCCESS, {200, ?CONTENT_HTML, <<"Success.">>}).
 -define(RESP_SUCCESS_PARAM(RES), {200, ?CONTENT_HTML, atom_to_binary(RES, latin1)}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -75,11 +78,23 @@ code_change(_, _, State) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 start_mochiweb(Port) ->
-    ?INFO("Starting OpenRCC REST http handler. Listening port is ~p", [Port]),
+    ?INFO("Starting OpenRCC REST http handler. Listening ports are HTTP ~p and HTTPS ~p", 
+          [Port, Port + 1]),
     %% We need to do start_link there to link Mochiweb process into Supervision tree
     %% This process will die if Mochiweb process dies. 
     %% Thus Supervisor has an opportunity to restar boths. 
-    mochiweb_http:start_link([{port, Port}, {loop, {?MODULE, mochiweb_loop}}]).
+    mochiweb_http:start([{port, Port}, {loop, {?MODULE, mochiweb_loop}}]),
+
+    SslCertfile = util:get_certfile(),
+	SslKeyfile = util:get_keyfile(),
+    mochiweb_http:start([
+                         {port, Port + 1}, 
+                         {ssl, true},
+						 {ssl_opts, [
+                                     {certfile, SslCertfile},
+                                     {keyfile, SslKeyfile}
+                                    ]},
+                         {loop, {?MODULE, mochiweb_loop}}]).
 
 mochiweb_loop(Req) ->
     ?DEBUG("Start handeling of Request ~p", [Req]),
@@ -89,389 +104,490 @@ mochiweb_loop(Req) ->
                    N -> string:substr(Path, 1, length(Path) - (N + 1))
                end,
     QueryString = Req:parse_qs(),
-    handle_request(Resource, QueryString, Req).
-
+    try 
+        handle_request(Resource, QueryString, Req)
+    catch
+        %% There is always a posibility that agent or call process will die just before we call it
+        %% Also REST call could have invalid PID and we cannot check it for sure since there is no
+        %% clear way how to check PIDs on remote node
+        exit:{noproc, _Rest} ->
+            Req:respond({200, ?CONTENT_JSON, 
+                         encode_response(<<"false">>, <<"Invalid PID or Agent process has died">>)})
+    end.
+    
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% REST API %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-%% handle_request("/get_call_state", Req) ->
-%%     QueryStringData = Req:parse_qs(),
-%%     UserName = proplists:get_value("username", QueryStringData, ""), 
-%%     case cpx:get_agent(UserName) of
-%%         none -> 
-%%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary("Agent not logged in.")});
-%%         Pid ->
-%%             Agent = agent:dump_state(Pid),
-%%             #agent{used_channels = Channels} = Agent,
-            
-%%             case dict:fetch_keys(Channels) of
-%%                 [ChannelID] ->
-%%                     {status, _Pid, {module, _Module}, [_PDict, _SysState, _Parent, _Dbg, Misc]} = sys:get_status(ChannelID),
-%%                     [_, {data,[ _Tuple1, _Tuple2, _Tuple3,{"StateName", Data}]}, _] = Misc,
-%%                     Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(io_lib:format("~p",[Data]))});
-%%                 _ ->
-%%                     Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary("Agent not on call.")})
-%%             end
-%%     end;
-    
-
-%% handle_request("/get_release_state", Req) ->
-%%     QueryStringData = Req:parse_qs(),
-%%     UserName = proplists:get_value("username", QueryStringData, ""),
-%%     case cpx:get_agent(UserName) of
-%%         none -> 
-%%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary("Agent not logged in.")});
-%%         Pid ->
-%%             Agent = agent:dump_state(Pid),
-%%             ReleaseData = Agent#agent.release_data,
-%%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(io_lib:format("~p", [ReleaseData]))})
-%%     end;
-
-handle_request("/agents", _QueryString, Req) ->
-    Data = cpx:get_agents(),
-    Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(lists:flatten(io_lib:format("~p", [Data])))});
-
-handle_request("/clients", _QueryString, Req) ->
-    Data = call_queue_config:get_clients(),
-    Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(lists:flatten(io_lib:format("~p", [Data])))});
-
-handle_request("/queues", _QueryString, Req) ->
-    Data = call_queue_config:get_queues(),
-    Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(lists:flatten(io_lib:format("~p", [Data])))});
-
-handle_request("/ringtest/" ++ Agent, _QueryString, Req) ->
-    AgentPid = cpx:get_agent(Agent),
-    AgentRec = agent:dump_state(AgentPid),
-    Callrec = #call{id = "unused", source = self(), callerid= {"Echo test", "0000000"}},
-    
-    Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(lists:flatten(io_lib:format("~p~p~p", [AgentPid, AgentRec, Callrec])))}),
-
-    Data = freeswitch_media_manager:ring_agent_echo(AgentPid, AgentRec, Callrec, 60000),
-    Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(lists:flatten(io_lib:format("~p", [Data])))});
-    %Data = freeswitch_dialer:start(Node, Number, Exten, Skills, Client, Vars),
-
-%freeswitch_media_manager:make_outbound_call("DCF", cpx:get_agent("742"), agent:dump_state(cpx:get_agent("742")#agent.login)
-
-handle_request("/init_outbound/" ++ _Rest, _QueryString, Req) ->
-    Req:respond({200, [{"Content-Type", "text/html"}], <<"NYI.">>});
-
-handle_request("/dial" ++ _Rest, _QueryString, Req) ->
-    Req:respond({200, [{"Content-Type", "text/html"}], <<"NYI.">>});
-
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%  Node = 'freeswitch@127.0.0.1',
-%%  Username = "200",
-%%  Apid = cpx:get_agent(Username),
-%%  ClientName = "DCF",
-%%  Number = "1000",
-%%  DS = "sofia/sipxdev3.patlive.local/" ++ "\$1" ++ "@sipxdev3.patlive.local",
-%%  %{ok, Pid} = freeswitch_media_manager:make_outbound_call(ClientName, cpx:get_agent(Apid), Username),
-%%  {ok, Pid} = freeswitch_outbound:start(Node, Username, Apid, ClientName, DS, 30),
-%% 
-%%  Call = freeswitch_media:get_call(Pid),
-%%      %cdr:dialoutgoing(Call, Number),
-%% 
-%%  Fnode = 'freeswitch@127.0.0.1',
-%%  ?NOTICE("I'm supposed to dial ~p for ~p", [Number, Call#call.id]),
-%%  Self = self(),
-%%  AgentRec = agent:dump_state(Apid),
-%%  DialString = freeswitch_media_manager:get_agent_dial_string(AgentRec, []),
-%%  F = fun(RingUUID) ->
-%%          fun(ok, _Reply) ->
-%%                  Client = Call#call.client,
-%%                  CalleridArgs = case proplists:get_value(<<"callerid">>, Client#client.options) of
-%%                      undefined ->
-%%                          ["origination_privacy=hide_namehide_number"];
-%%                      CalleridNum ->
-%%                          ["origination_caller_id_name='"++Client#client.label++"'", "origination_caller_id_number='"++binary_to_list(CalleridNum)++"'"]
-%%                  end,
-%% 
-%%                  freeswitch:bgapi(Fnode, uuid_setvar, RingUUID ++ " ringback %(2000,4000,440.0,480.0)"),
-%%                  %freeswitch:bgapi(Fnode, uuid_setvar, RingUUID ++ " ringback tone_stream://path=/usr/local/freeswitch/conf/tetris.ttml;loops=10"),
-%% 
-%%                  freeswitch:sendmsg(Fnode, RingUUID,
-%%                      [{"call-command", "execute"},
-%%                          {"execute-app-name", "bridge"},
-%%                          {"execute-app-arg", freeswitch_media_manager:do_dial_string(DS, Number, ["origination_uuid="++Call#call.id | CalleridArgs])}]),
-%%                  Self ! {connect_uuid, Number};
-%%              (error, Reply) ->
-%%                  ok
-%%          end
-%%  end,
-%%  RecPath = case cpx_supervisor:get_archive_path(Call) of
-%%      none ->
-%%          ?DEBUG("archiving is not configured for ~p", [Call#call.id]),
-%%          undefined;
-%%      {error, _Reason, Path} ->
-%%          ?WARNING("Unable to create requested call archiving directory for recording ~p for ~p", [Path, Call#call.id]),
-%%          undefined;
-%%      Path ->
-%%          Path++".wav"
-%%  end,
-%% 
-%%  F2 = fun(_RingUUID, EventName, _Event, InState) ->
-%%          case EventName of
-%%              "CHANNEL_BRIDGE" ->
-%%                  agent:conn_cast(Apid, {mediaload, Call, [{<<"height">>, <<"300px">>}]}),
-%%                  ?DEBUG("archiving ~p to ~s.wav", [Call#call.id, RecPath]),
-%%                  freeswitch:api(Fnode, uuid_setvar, Call#call.id ++ " RECORD_APPEND true"),
-%%                  freeswitch:api(Fnode, uuid_record, Call#call.id ++ " start "++RecPath),
-%%                  Self ! bridge;
-%%              _ ->
-%%                  ok
-%%          end,
-%%          {noreply, InState}
-%%  end,
-%%  F(Call#call.id),
-%% 
-%%  case freeswitch_ring:start(Fnode, [{handle_event, F2}], [{call, Call}, {agent, "200"}, {dialstring, DS}, {destination, Number}, no_oncall_on_bridge, {needed_events, ['CHANNEL_BRIDGE']}]) of
-%%      {ok, Pid2} ->
-%%          link(Pid2),
-%%          cdr:dialoutgoing(Call, Number);
-%%      {error, Error} ->
-%%          ?ERROR("error creating ring channel for ~p:  ~p; agent:  ~s", [Call#call.id, Error, AgentRec#agent.login])
-%%  end,
-%%  Req:respond({200, [{"Content-Type", "text/html"}], <<"Success.">>});
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-%%--------------------------------------------------------------------
-%% @doc
-%% Executes silent monitoring of Agent's call. 
-%%     HTTP request - <server:port>/spy?spy=<spy name>&target=<target name>
-%%          <spy name> is an agent name who will be a listener/spy
-%%          <target name> is an agent name who is going to be monitored.
-%%     The method can return: 
-%%          400 Bad request - Spy or Target agents are not logged in
-%%          200 OK - Agents are there and the request has been executed.  
-%%                   Actual result of the execution is on HTTP response body
-%% @end
-%%--------------------------------------------------------------------
-handle_request("/spy" ++ _Rest, QueryString, Req) ->
-    Spy = proplists:get_value("spy", QueryString, ""),
-    Target = proplists:get_value("target", QueryString, ""),
-    case {agent_manager:query_agent(Spy), agent_manager:query_agent(Target)} of
-        {false, _} ->
-            Req:respond({400, ?CONTENT_HTML, << "Spy agent is not logged in" >>});
-        {_, false} ->
-            Req:respond({400, ?CONTENT_HTML, << "Target agent is not logged in" >>});
-        {false, false} ->
-            Req:respond({400, ?CONTENT_HTML, << "Spy and Target agents are not logged in" >>});
-        {{true, SpyPid}, {true, TargetPid}} ->
-            Req:respond(?RESP_SUCCESS_PARAM(agent:spy(SpyPid, TargetPid)))
-    end;
-
 %%--------------------------------------------------------------------
 %% @doc
 %% Login an agent in OpenACD. The agent will be unavaible state.
-%%     HTTP request - <server:port>/login?username=<agent name>&password=<password>
+%%     HTTP request - <server:port>/login?agent=<agent name>&password=<password>&domain=<SIP domain>
 %%         <agent name> - is an agent name.
 %%         <password> - is password in plain text (Unsecured).
+%%         <SIP domain> - SIP domain name
 %%     The method can return:
-%%         400 Bad request - the request doesn't have username parameter
-%%         403 Forbidden - Invalid agent name or password
-%%         200 OK - Agent has been logged in
+%%         200 OK - JSON object contains execution result in 'success' field
 %% @end
 %%--------------------------------------------------------------------
 handle_request("/login" ++ _Rest, QueryString, Req) ->
-    User = ?GET_USERNAME(QueryString),
-    Password = proplists:get_value("password", QueryString),
-    Respond = handle_login(agent_manager:query_agent(User), User, 
-                           {Password, parse_endpoint(User, QueryString)}),
-    Req:respond(Respond);
+    Username = proplists:get_value("agent", QueryString, ""),
+    Password = proplists:get_value("password", QueryString, ""),
+    Domain = proplists:get_value("domain", QueryString, "config.acd.dcf.patlive.local"),
+    
+    %% Endpointdata = [ Username, "@", Domain | [] ],
+    %% Endpointtype = pstn,
+    %% Testing parameter
+    Endpointdata =  Username,
+    Endpointtype = sip_registration,
+
+    Persistance = transient,
+    Bandedness = outband,
+    
+    case agent_manager:query_agent(Username) of 
+        false ->
+            AuthResult = agent_auth:auth(Username, Password),
+            Respond = handle_login(AuthResult, Username, Password, 
+                                   {Endpointtype, Endpointdata, Persistance}, Bandedness),
+            Req:respond(Respond);
+        {true, _PID} ->
+            Req:respond({200, ?CONTENT_JSON, 
+                         encode_response(<<"false">>, <<"Agent already logged in.">>)})
+    end;
 
 %%--------------------------------------------------------------------
 %% @doc
 %% Logout an agent from OpenACD.
 %%    HTTP request - <server:port>/logout?username=<agent name>
+%%                 - <server:port>/logout?agent_pid=<agent pid>
 %%        <agent name> - is an agent name.
+%%        <agent pid> - is an agent pid.
 %%    The method can return:
-%%        400 Bad request - the request doesn't have username parameter
-%%        200 OK - Agent has been logged out 
+%%        200 OK - JSON object contains execution result in 'success' field
 %% @end
 %%--------------------------------------------------------------------
 handle_request("/logout" ++ _Rest, QueryString, Req) ->
-    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), stop, []),                   
+    case get_agentpid(QueryString) of
+        undefined ->
+            Respond = ?RESP_AGENT_NOT_LOGGED;
+        Pid ->
+            agent:stop(Pid),
+            Respond = ?RESP_SUCCESS
+    end,
     Req:respond(Respond);
 
 %%--------------------------------------------------------------------
 %% @doc
 %% Make an agent avaiable for calls.
-%%    HTTP request - <server:port>/set_avail?username=<agent name>
+%%    HTTP request - <server:port>/set_avail?agent=<agent name>
+%%                   <server:port>/set_avail?agent_pid=<agent pid>
 %%        <agent name> - is an agent name.
+%%        <agent pid> - is an agent pid.
 %%    The method can return:
-%%        400 Bad request - the request doesn't have username parameter
-%%        200 OK - The request is executed. Actual result is in HTTP response body
+%%        200 OK - JSON object contains execution result in 'success' field
 %% @end
 %%--------------------------------------------------------------------
 handle_request("/set_avail" ++ _Rest, QueryString, Req) ->
-    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), set_state, [idle]),
-    Req:respond(Respond);
-
-%%--------------------------------------------------------------------
-%% @doc
-%% Make an agent unavaiable for calls.
-%%    HTTP request - <server:port>/set_released?username=<agent name>
-%%        <agent name> - is an agent name.
-%%    The method can return:
-%%        400 Bad request - the request doesn't have username parameter
-%%        200 OK - The request is executed. Actual result is in HTTP response body
-%% @end
-%%--------------------------------------------------------------------
-handle_request("/set_released" ++ _Rest, QueryString, Req) ->
-    Reason = get_released_reason(QueryString),
-    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), set_state, [Reason]),
-    Req:respond(Respond);
+    case get_agentpid(QueryString) of 
+        undefined ->
+            Req:respond(?RESP_AGENT_NOT_LOGGED);
+        Pid ->
+            agent:set_state(Pid, idle),
+            Req:respond(?RESP_SUCCESS)
+    end;
 
 %%--------------------------------------------------------------------
 %% @doc
 %% End current call on agent and put the agent into wrapup state
-%%    HTTP request - <server:port>/hangup?username=<agent name>
-%%        <agent name> - is an agent name who owns the call to be dropped
+%%    HTTP request:
+%%             <server:port>/hangup?agent=<agent name>
+%%             <server:port>/hangup?agent_pid=<agent pid>
+%%        <agent name> - is an agent name.
+%%        <agent pid> - is an agent pid.
 %%    The method can return:
-%%        400 Bad request - the request doesn't have username parameter
-%%        200 OK - The request is executed. Actual result is in HTTP response body
+%%        200 OK - JSON object contains execution result in 'success' field
 %% @end
 %%--------------------------------------------------------------------
 handle_request("/hangup" ++ _Rest, QueryString, Req) ->
-    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), set_state, [wrapup]),
-    Req:respond(Respond);
+    case get_agentpid(QueryString) of 
+        undefined ->
+            Req:respond(?RESP_AGENT_NOT_LOGGED);
+        Pid ->
+            %% agent:set_state will not work due to a guard in agent.erl
+            #agent{connection=CPid} = agent:dump_state(Pid),
+            agent_connection:set_state(CPid, wrapup),
+            Req:respond(?RESP_SUCCESS)
+    end;
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Make an agent avaiable for calls after call work.
-%%    HTTP request - <server:port>/hangup?username=<agent name>
+%% Make an agent avaiable for calls after callwork.
+%%    HTTP request: 
+%%             <server:port>/hangup?agent=<agent name>
+%%             <server:port>/hangup?agent_pid=<agent pid>
 %%        <agent name> - is an agent name.
+%%        <agent pid> - is an agent pid.
 %%    The method can return:
-%%        400 Bad request - the request doesn't have username parameter
-%%        200 OK - The request is executed. Actual result is in HTTP response body
+%%        200 OK - JSON object contains execution result in 'success' field
 %% @end
 %%--------------------------------------------------------------------
 handle_request("/end_wrapup" ++ _Rest, QueryString, Req) ->
-    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), set_state, [idle]),
-    Req:respond(Respond);
+    case get_agentpid(QueryString) of
+        undefined ->
+            Req:respond(?RESP_AGENT_NOT_LOGGED);
+        Pid ->
+            %% agent:set_state will not work due to a guard in agent.erl
+            #agent{connection=CPid} = agent:dump_state(Pid),
+            agent_connection:set_state(CPid, idle),
+            Req:respond(?RESP_SUCCESS)
+    end;
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Transfer a call from an agent to a queue. The agent will be put in wrapup state
-%%    HTTP request - <server:port>/hangup?username=<agent name>&queue=<queue name>
-%%        <agent name> - is an agent name who owns the call
-%%        <queue name> - is a queue name where the call will be transfered.
+%% Returns PID of Agent
+%%    HTTP request: 
+%%             <server:port>/get_pid?agent=<agent name>
+%%        <agent name> - is an agent name.
 %%    The method can return:
-%%        400 Bad request - the request doesn't have username parameter
-%%        200 OK - The request is executed. Actual result is in HTTP response body
+%%        200 OK - JSON object contains execution result in 'success' field
 %% @end
 %%--------------------------------------------------------------------
-handle_request("/queue_transfer" ++ _Rest, QueryString, Req) ->
-    QueueName = proplists:get_value("queue", QueryString, "default_queue"),
-    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), queue_transfer, [QueueName]),
-    Req:respond(Respond);
-
-%%--------------------------------------------------------------------
-%% @doc
-%% Transfer a call from one agent to another one.
-%%    HTTP request - <server:port>/hangup?username=<agent name>&agent=<target agent>
-%%        <agent name> - is an agent name whom owns the call
-%%        <target agent> - is an agent name where the call will be transfered.
-%%    The method can return:
-%%        400 Bad request - the request doesn't have username parameter.
-%%        403 Forbidden - The request is correct but username and agent parameters are equal
-%%        200 OK - The request is executed. Actual result is in HTTP response body
-%% @end
-%%--------------------------------------------------------------------
-handle_request("/agent_transfer" ++ _Rest, QueryString, Req) ->
-    TransferTo = proplists:get_value("agent", QueryString),
-    User = ?GET_USERNAME(QueryString),
-    case TransferTo of
-        User ->
-            Respond = {403, ?CONTENT_HTML, <<"Cannot transfer a call to self">>};
-        _Else ->
-            Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), agent_transfer, [TransferTo])
-    end,
-    Req:respond(Respond);
+handle_request("/get_pid" ++ _Rest, QueryString, Req) ->
+    AgentName = proplists:get_value("agent", QueryString, ""),
+    case agent_manager:query_agent(AgentName) of
+        false ->
+            Req:respond(?RESP_AGENT_NOT_LOGGED);
+        {true, Pid} ->
+            Req:respond({200, ?CONTENT_JSON, 
+                         encode_response(<<"true">>, [{pid, to_binary(Pid)}])})
+    end;
 
 %%--------------------------------------------------------------------
 %% @doc
 %% Request information about agent's state
-%%    HTTP request - <server:port>/get_call_state?username=<agent name>
+%%    HTTP request: 
+%%             <server:port>/get_call_state?agent=<agent name>
+%%             <server:port>/get_call_state?agent_pid=<agent pid>
 %%        <agent name> - is an agent name
+%%        <agent pid> - is an agent pid.
 %%    The method can return:
-%%        400 Bad request - the request doesn't have username parameter.
-%%        200 OK - The request is executed. Actual result is in HTTP response body
+%%        200 OK - JSON object contains execution result in 'success' field
 %% @end
 %%--------------------------------------------------------------------    
 handle_request("/get_call_state" ++ _Rest, QueryString, Req) ->
-    case agent_manager:query_agent(?GET_USERNAME(QueryString)) of
-        false ->
-            Respond = ?RESP_NOTLOGGED_USER;
-        {true, Pid} ->
+    case get_agentpid(QueryString) of 
+        undefined ->
+            Req:respond(?RESP_AGENT_NOT_LOGGED);
+        Pid ->
+            #agent{state=State} = agent:dump_state(Pid),
+            Req:respond({200, ?CONTENT_JSON, 
+                         encode_response(<<"true">>, [{call_state, to_binary(State)}])})
+    end;
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Make an agent unavaiable for calls.
+%%    HTTP request:
+%%             <server:port>/set_released?agent=<agent name>
+%%             <server:port>/set_released?agent_pid=<agent pid>
+%%        <agent name> - is an agent name.
+%%        <agent pid> - is an agent pid.
+%%    The method can return:
+%%        200 OK - JSON object contains execution result in 'success' field
+%% @end
+%%--------------------------------------------------------------------
+handle_request("/set_released" ++ _Rest, QueryString, Req) ->
+    case get_agentpid(QueryString) of
+        undefined ->
+            Req:respond(?RESP_AGENT_NOT_LOGGED);
+        Pid ->
+            Reason = get_released_reason(QueryString),
+            agent:set_state(Pid, released, Reason),
+            Req:respond(?RESP_SUCCESS)
+    end;
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Returns Agent's release state.
+%%    HTTP request:
+%%             <server:port>/get_release_state?agent=<agent name>
+%%             <server:port>/get_release_state?agent_pid=<agent pid>
+%%        <agent name> - is an agent name.
+%%        <agent pid> - is an agent pid.
+%%    The method can return:
+%%        200 OK - JSON object contains execution result in 'success' field 
+%%                 and Released state
+%% @end
+%%--------------------------------------------------------------------
+handle_request("/get_release_state" ++ _Rest, QueryString, Req) ->
+    case get_agentpid(QueryString) of
+        undefined ->
+            Req:respond(?RESP_AGENT_NOT_LOGGED);
+        Pid ->
             AgentState = agent:dump_state(Pid),
-            Respond = {200, ?CONTENT_HTML, list_to_binary(io_lib:format("~p", [AgentState#agent.state]))}
+            case AgentState#agent.statedata of 
+                {Id, default, Bias} ->
+                    JSON = encode_response(<<"true">>, 
+                                           [
+                                            {<<"id">>, to_binary(Id)},
+                                            {<<"label">>, <<"default">>},
+                                            {<<"bias">>, to_binary(Bias)}
+                                            ]);
+                {Id, Label, Bias} ->
+                    JSON = encode_response(<<"true">>, 
+                                           [
+                                            {<<"id">>, to_binary(Id)},
+                                            {<<"label">>, to_binary(Label)},
+                                            {<<"bias">>, to_binary(Bias)}
+                                            ]);
+                Others ->
+                    JSON = encode_response(<<"true">>, 
+                                           [{release_data, to_binary(io_lib:format("~w", [Others]))}])
+            end,
+            Req:respond({200, ?CONTENT_JSON, JSON})                                        
+    end;
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Returns Agent's release state.
+%%    HTTP request:
+%%             <server:port>/get_release_opts
+%%    The method can return:
+%%        200 OK - JSON object contains execution result in 'success' field 
+%%                 and Released state
+%% @end
+%%--------------------------------------------------------------------
+handle_request("/get_release_opts" ++ _Rest, _QueryString, Req) ->
+    JSON = encode_response(<<"true">>, [ {release_opts, 
+                                          lists:map( fun relase_opt_record_to_proplist/1, agent_auth:get_releases())}
+                                       ]),
+	Req:respond({200, ?CONTENT_JSON, JSON});
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Executes silent monitoring of Agent's call. 
+%%     HTTP request: 
+%%              <server:port>/spy?spy=<spy name>&target=<target name>
+%%              <server:port>/spy?spy_pid=<spy pid>&target_pid=<target pid>
+%%          <spy name> is Spy agent name
+%%          <spy pid> is Spy agent pid
+%%          <target name> is Target agent name
+%%          <target pid> is Target agent pid
+%%     The method can return: 
+%%          200 OK - JSON object contains execution result in 'success' field
+%% @end
+%%--------------------------------------------------------------------
+handle_request("/spy" ++ _Rest, QueryString, Req) ->
+    SpyPid = get_pid(QueryString, "spy_pid", "spy"),
+    TargetPid = get_pid(QueryString, "target_pid", "target"),
+    case {SpyPid, TargetPid} of 
+        {undefined, undefined} ->
+            JSON = encode_response(<<"false">>, <<"Spy and target agents are not logged in.">>);
+        {undefined, _} ->
+            JSON = encode_response(<<"false">>, <<"Spy agent is not logged in">>);
+        {_, undefined} ->
+            JSON = encode_response(<<"false">>, <<"Target agent is not logged in">>);
+        _Else ->
+            #agent{statedata = Callrec} = agent:dump_state(TargetPid),
+            %% TODO - The operation could fail because a call is dropped just before.
+            %% What we need to do there?
+            gen_media:spy(Callrec#call.source, SpyPid, agent:dump_state(SpyPid)),
+            JSON = encode_response(<<"true">>)
     end,
-    Req:respond(Respond);
+    Req:respond({200, ?CONTENT_JSON, JSON});
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Executes silent monitoring and whisper to Agent.
+%%     HTTP request: 
+%%              <server:port>/coach?coach=<spy name>&target=<target name>
+%%              <server:port>/couch?couch_pid=<spy pid>&target_pid=<target pid>
+%%          <spy name> is Spy agent name
+%%          <spy pid> is Spy agent pid
+%%          <target name> is Target agent name
+%%          <target pid> is Target agent pid
+%%     The method can return: 
+%%          200 OK - JSON object contains execution result in 'success' field
+%% @end
+%%--------------------------------------------------------------------
+handle_request("/coach" ++ _Rest, QueryString, Req) ->
+    CoachPid = get_pid(QueryString, "coach_pid", "coach"),
+    TargetPid = get_pid(QueryString, "target_pid", "target"),
+    case {CoachPid, TargetPid} of 
+        {undefined, undefined} ->
+            JSON = encode_response(<<"false">>, <<"Coach and target agents are not logged in.">>);
+        {undefined, _} ->
+            JSON = encode_response(<<"false">>, <<"Spy agent not logged in.">>);
+        {_, undefined} ->
+            JSON = encode_response(<<"false">>, <<"Coach agent not logged in.">>);
+        _Else ->
+            #agent{statedata = Callrec} = agent:dump_state(TargetPid),
+            %% TODO - The operation could fail because a call is dropped just before.
+            %% What we need to do there?
+			gen_media:spy(Callrec#call.source, CoachPid, agent:dump_state(CoachPid)),
+			freeswitch_media:spy_whisper_agent(Callrec#call.source),
+            JSON = encode_response(<<"true">>)
+    end,
+    Req:respond({200, ?CONTENT_JSON, JSON});
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Transfer a call from an agent to a queue. The agent will be put in wrapup state
+%%    HTTP request: 
+%%             <server:port>/queue_transfer?agent=<agent name>&queue=<queue name>
+%%             <server:port>/queue_transfer?agent_pid=<agent pid>&queue=<queue name>
+%%        <agent name> - is an agent name who owns the call
+%%        <agent pid> - is an agent pid.
+%%        <queue name> - is a queue name where the call will be transfered.
+%%    The method can return:
+%%        200 OK - JSON object contains execution result in 'success' field 
+%% @end
+%%--------------------------------------------------------------------
+handle_request("/queue_transfer" ++ _Rest, QueryString, Req) ->
+    case get_agentpid(QueryString) of
+        undefined ->
+            Req:respond(?RESP_AGENT_NOT_LOGGED);
+        Pid ->
+            QueueName = proplists:get_value("queue", QueryString),
+            Result = agent:queue_transfer(Pid, QueueName),
+            Req:respond({200, ?CONTENT_JSON, 
+                         encode_response(<<"true">>, [
+                                                      { return, to_binary(Result) }
+                                                      ])})
+    end;
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Transfer a call from one agent to another one.
+%%    HTTP request:
+%%             <server:port>/agent_transfer?from=<agent name>&to=<target agent>
+%%             <server:port>/agent_transfer?from_pid=<agent pid>&to_pid=<target pid>
+%%        <agent name> - is an agent name whom
+%%        <agent pid> - is an agent pid
+%%        <target agent> - is target agent name
+%%        <target pid> - is target agent pid
+%%    The method can return:
+%%        200 OK - JSON object contains execution result in 'success' field 
+%% @end
+%%--------------------------------------------------------------------
+handle_request("/agent_transfer" ++ _Rest, QueryString, Req) ->
+    FromPid = get_pid(QueryString, "from_pid", "from"),
+    ToPid = get_pid(QueryString, "to_pid", "to"),
+    case {FromPid, ToPid} of 
+        {undefined, undefined} ->
+            JSON = encode_response(<<"false">>, <<"Transferer and Transferee agents are not logged in.">>);
+        {undefined, _} ->
+            JSON = encode_response(<<"false">>, <<"Transferer agent is not logged in.">>);
+        {_, undefined} ->
+            JSON = encode_response(<<"false">>, <<"Transferee agent is not logged in.">>);
+        {FromPid, FromPid} ->
+            JSON = encode_response(<<"false">>, <<"Transferer and Transferee agents are equal">>);
+        _Else ->
+            Result = agent:agent_transfer(FromPid, ToPid),
+            JSON = encode_response(<<"true">>, [
+                                                { return, to_binary(Result) }
+                                               ])
+    end,
+    Req:respond({200, ?CONTENT_JSON, JSON});
 
 %%--------------------------------------------------------------------
 %% @doc
 %% Put agent's call to hold/unhold state
-%%    HTTP request - <server:port>/toggle_hold?username=<agent name>
+%%    HTTP request: 
+%%             <server:port>/toggle_hold?agent=<agent name>
+%%             <server:port>/toggle_hold?agent_pid=<agent pid>
 %%        <agent name> - is an agent name
+%%        <agent pid> - is agent pid
 %%    The method can return:
-%%        400 Bad request - the request doesn't have username parameter.
-%%        200 OK - The request is executed. Actual result is in HTTP response body
+%%        200 OK - JSON object contains execution result in 'success' field 
 %% @end
 %%--------------------------------------------------------------------  
 handle_request("/toggle_hold" ++ _Rest, QueryString, Req) ->
-    Respond = find_agent_and_apply2(?GET_USERNAME(QueryString), 
-                                    media_command, [{cast, <<"toggle_hold">>, []}]),
-    Req:respond(Respond);
+    case get_agentpid(QueryString) of 
+        undefined ->
+            Req:respond(?RESP_AGENT_NOT_LOGGED);
+        Pid ->
+            #agent{connection=CPid} = agent:dump_state(Pid),
+            agent_connection:media_command(CPid, {cast, <<"toggle_hold">>, []}),
+            Req:respond(?RESP_SUCCESS)
+    end;
 
 handle_request(_Path, _QueryString, Req) ->
     Req:respond({404, ?CONTENT_HTML, <<"Not Found">>}).
 
-%% handle_request("/get_channels" ++ _Rest, Req) ->
-%%     QueryStringData = Req:parse_qs(),
-%%     UserName = proplists:get_value("username", QueryStringData, ""), 
-    
-%%     case cpx:get_agent(UserName) of
-%%         none -> 
-%%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary("Agent not logged in.")});
-%%         Pid ->
-%%             Agent = agent:dump_state(Pid),
-%%             #agent{used_channels = Channels} = Agent,
-%%             List =dict:fetch_keys(Channels),
-%%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(io_lib:format("~p",[List]))})
-%%     end;
-
-%% handle_request("/get_voice_channel" ++ _Rest, Req) ->
-%%     QueryStringData = Req:parse_qs(),
-%%     UserName = proplists:get_value("username", QueryStringData, ""), 
-    
-%%     case cpx:get_agent(UserName) of
-%%         none -> 
-%%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary("Agent not logged in.")});
-%%         Pid ->
-%%             Agent = agent:dump_state(Pid),
-%%             #agent{used_channels = Channels} = Agent,
-            
-%%             [ChannelID] = dict:fetch_keys(Channels),
-%%             Req:respond({200, [{"Content-Type", "text/html"}], list_to_binary(io_lib:format("~p",[ChannelID]))})
-%%     end;
-
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+ 
+%%--------------------------------------------------------------------
+%% @doc
+%% Checks a authorization result and tries to login an agent into OpenACD
+%% @end
+%%--------------------------------------------------------------------
+handle_login({allow, Id, Skills, Security, Profile}=_AuthResult, 
+             Username, Password, {Endpointtype, Endpointdata, Persistance}=Endpoint, 
+             Bandedness) ->
+    Agent = #agent{
+      id = Id, 
+      defaultringpath = Bandedness, 
+      login = Username, 
+      skills = Skills, 
+      profile=Profile, 
+      password=Password,
+      endpointtype = Endpointtype,
+      endpointdata = Endpointdata,
+      security_level = Security
+     },
+    {ok, Pid} = agent_connection:start(Agent),
+    Node = erlang:node(Pid),
+    ?INFO("~s logged in with endpoint ~p", [Username, Endpoint]),
+    agent_connection:set_endpoint(Pid, {Endpointtype, Endpointdata}, Persistance),
+    AgentPid = agent_connection:get_agentpid(Pid),
+    {200, ?CONTENT_JSON, encode_response(<<"true">>, 
+                                        [
+                                         {node, to_binary(Node)}, 
+                                         {pid, to_binary(AgentPid)}
+                                       ])};                                                             
+handle_login(_AuthResult, _Username, _Password, _Endpoint, _Bandedness) ->
+    {200, ?CONTENT_JSON, encode_response(<<"false">>, <<"Invalid username and/or password.">>)}.
 
-parse_endpoint(UserName, QueryString) ->
-    %% TODO - Need to be verified with different types.
-    EndpointType = proplists:get_value(endpointtype, QueryString, sip_registration),
-    EndpointData = proplists:get_value(endpointdata, QueryString, UserName),
-    {EndpointType, EndpointData}.
+%%--------------------------------------------------------------------
+%% @doc
+%% Extracts AgentPID from HTTP Query string.
+%% @end
+%%--------------------------------------------------------------------
+get_agentpid(QueryString) ->
+    get_pid(QueryString, "agent_pid", "agent").
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Extracts PID from Query string. If 'pid' parameter is not defined 
+%% when 'agent' will be used to get Agent PID registered in agent_manager
+%% @end
+%%--------------------------------------------------------------------
+get_pid(QueryString, Pid, Name) ->
+    case proplists:get_value(Pid, QueryString) of 
+        undefined ->
+            get_pid(Name, QueryString);
+        Value ->
+            %% erlang:is_process_alive will not work with remote nodes
+            %% So we need another way to check Pid validity
+            to_pid(Value)
+    end.
+get_pid(Name, QueryString) ->
+    Value = proplists:get_value(Name, QueryString, ""),
+    case agent_manager:query_agent(Value) of
+        false ->
+            undefined;
+        {true, Pid} ->
+            Pid
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Extract and format Release reason
+%% @end
+%%--------------------------------------------------------------------
 get_released_reason(QueryString) ->
     Id = proplists:get_value("id", QueryString),
     Label = proplists:get_value("label", QueryString),
@@ -479,46 +595,57 @@ get_released_reason(QueryString) ->
     get_released_reason(Id, Label, Bias).
 
 get_released_reason(undefined, _, _) ->
-    {released, default};
+    default;
 get_released_reason(_, undefined, _) ->
-    {released, default};
+    default;
 get_released_reason(_, _, undefined) ->
-    {released, default};
+    default;
 get_released_reason(Id, Label, Bias) ->
-    {released, {Id, Label, list_to_integer(Bias)}}.
+    {Id, Label, list_to_integer(Bias)}.
 
-handle_login(false, UserName, {Password, Endpoint}) ->
-    case agent_auth:auth(UserName, Password) of
-        {allow, Id, Skills, Security, Profile} ->
-            Agent = #agent{
-              id = Id, 
-              login = UserName, 
-              skills = Skills, 
-              profile=Profile, 
-              security_level = Security
-             },
-            {ok, Pid} = agent_connection:start(Agent),
-            agent_connection:set_endpoint(Pid, Endpoint),
-            {200, ?CONTENT_HTML, << "Success" >>};
-        deny ->
-            {403, ?CONTENT_HTML, << "Agent is not found or invalid password" >>}
-    end;
-handle_login(Pid, UserName, _Args) ->
-    {200, ?CONTENT_HTML, list_to_binary(
-                           io_lib:format("~p is already logged in. Pid=~p", [UserName, Pid])
-                          )}.
+%%--------------------------------------------------------------------
+%% @doc
+%% Encode responce in JSON format
+%% @end
+%%--------------------------------------------------------------------
+encode_response(Result) ->
+    mochijson2:encode([{success, Result}]).
 
-find_agent_and_apply2("", _Function, _Args) ->
-    ?RESP_MISSED_USERNAME;
-find_agent_and_apply2(User, Function, Args) ->
-    case agent_manager:query_agent(User) of 
-        false ->
-            ?RESP_NOTLOGGED_USER;
-        {true, Pid} ->
-            % Ugly code, but it's easiest way to do it for now
-            #agent{connection=CPid} = agent:dump_state(Pid),
-            Res = erlang:apply(agent_connection, 
-                               Function, [CPid | Args]),
-            ?RESP_SUCCESS_PARAM(Res)
-    end.
+encode_response(Result, Message) when is_binary(Message) ->
+    mochijson2:encode([{success, Result}, {message, Message}]);
+encode_response(Result, Rest) when is_list(Rest) ->
+    mochijson2:encode([{success, Result} | Rest]).
 
+% Utility functions for converting a #release_opt record (located in agent.hrl) into a property list. 
+% These functions are used to convert a list of #release_opt's into a JSON string.
+relase_opt_record_to_proplist(#release_opt{} = Rec) ->
+  lists:zip(record_info(fields, release_opt), lists:map(fun to_binary/1, tl(tuple_to_list(Rec)))).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Convert terms into binary format. 
+%% List, Atom, Pid, Integer and Binary are supported for now
+%% @end
+%%--------------------------------------------------------------------
+to_binary(Var) when is_list(Var) ->
+    list_to_binary(Var);
+to_binary(Var) when is_atom(Var) ->
+    atom_to_binary(Var, latin1);
+to_binary(Var) when is_pid(Var) ->
+    list_to_binary(pid_to_list(Var));
+to_binary(Var) when is_binary(Var) ->
+    Var;
+to_binary(Var) when is_integer(Var) ->
+    list_to_binary(integer_to_list(Var)).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Convert List or Binary to Pid
+%% @end
+%%--------------------------------------------------------------------
+to_pid(Var) when is_binary(Var) ->
+    list_to_pid(binary_to_list(Var));
+to_pid(Var) when is_list(Var) ->
+    list_to_pid(Var);
+to_pid(Var) when is_pid(Var) ->
+    Var.
