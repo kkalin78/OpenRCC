@@ -403,15 +403,18 @@ handle_request("/coach" ++ _Rest, QueryString, Req) ->
         {undefined, undefined} ->
             JSON = encode_response(<<"false">>, <<"Coach and target agents are not logged in.">>);
         {undefined, _} ->
-            JSON = encode_response(<<"false">>, <<"Spy agent not logged in.">>);
+            JSON = encode_response(<<"false">>, <<"Spy agent is not logged in.">>);
         {_, undefined} ->
-            JSON = encode_response(<<"false">>, <<"Coach agent not logged in.">>);
+            JSON = encode_response(<<"false">>, <<"Coach agent is not logged in.">>);
         _Else ->
             #agent{statedata = Callrec} = agent:dump_state(TargetPid),
-            %% TODO - The operation could fail because a call is dropped just before.
-            %% What we need to do there?
-			gen_media:spy(Callrec#call.source, CoachPid, agent:dump_state(CoachPid)),
-			freeswitch_media:spy_whisper_agent(Callrec#call.source),
+            CoachRec = agent:dump_state(CoachPid),
+
+            %% Executes freeswitch_media:spy_single_step in separated process 
+            %% since spy_single_step will be blocked until Coach agent picks up a spy call.
+            spawn(fun() ->
+                          freeswitch_media:spy_single_step(Callrec#call.source, CoachRec, agent)
+                  end),
             JSON = encode_response(<<"true">>)
     end,
     Req:respond({200, ?CONTENT_JSON, JSON});
@@ -493,8 +496,73 @@ handle_request("/toggle_hold" ++ _Rest, QueryString, Req) ->
         undefined ->
             Req:respond(?RESP_AGENT_NOT_LOGGED);
         Pid ->
-            #agent{connection=CPid} = agent:dump_state(Pid),
-            agent_connection:media_command(CPid, {cast, <<"toggle_hold">>, []}),
+            execute_media(Pid, cast, toggle_hold),
+            Req:respond(?RESP_SUCCESS)
+    end;
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Dial 3rd party number
+%%    HTTP request: 
+%%             <server:port>/contact_3rd_party?agent=<agent name>&dest=<3rd party number>
+%%             <server:port>/contact_3rd_party?agent_pid=<agent pid>&dest=<3rd party number>
+%%        <agent name> - is an agent name
+%%        <agent pid> - is agent pid
+%%        <3rd party number> - a number to call
+%%    The method can return:
+%%        200 OK - JSON object contains execution result in 'success' field 
+%% @end
+%%--------------------------------------------------------------------  
+handle_request("/contact_3rd_party" ++ _Rest, QueryString, Req) ->
+    case get_agentpid(QueryString) of 
+        undefined ->
+            Req:respond(?RESP_AGENT_NOT_LOGGED);
+        Pid ->
+            Dest = proplists:get_value("dest", QueryString),
+            execute_media(Pid, cast, {contact_3rd_party, Dest}),
+            Req:respond(?RESP_SUCCESS)
+    end;
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Merge Agent, Initial and 3rd party calls into conference
+%%    HTTP request: 
+%%             <server:port>/merge_all?agent=<agent name>
+%%             <server:port>/merge_all?agent_pid=<agent pid>
+%%        <agent name> - is an agent name
+%%        <agent pid> - is agent pid
+%%    The method can return:
+%%        200 OK - JSON object contains execution result in 'success' field 
+%% @end
+%%--------------------------------------------------------------------  
+handle_request("/merge_all" ++ _Rest, QueryString, Req) ->
+    case get_agentpid(QueryString) of
+        undefined ->
+            Req:respond(?RESP_AGENT_NOT_LOGGED);
+        Pid ->
+            execute_media(Pid, cast, {merge_3rd_party, true}),
+            Req:respond(?RESP_SUCCESS)
+    end;
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Ends a conference assotiated with the agent and drops all active calls 
+%% within the conference
+%%    HTTP request: 
+%%             <server:port>/end_conference?agent=<agent name>
+%%             <server:port>/end_conference?agent_pid=<agent pid>
+%%        <agent name> - is an agent name
+%%        <agent pid> - is agent pid
+%%    The method can return:
+%%        200 OK - JSON object contains execution result in 'success' field 
+%% @end
+%%--------------------------------------------------------------------  
+handle_request("/end_conference" ++ _Rest, QueryString, Req) ->
+    case get_agentpid(QueryString) of 
+        undefined ->
+            Req:respond(?RESP_AGENT_NOT_LOGGED);
+        Pid ->
+            execute_media(Pid, call, end_conference),
             Req:respond(?RESP_SUCCESS)
     end;
 
@@ -607,6 +675,18 @@ encode_response(Result, Rest) when is_list(Rest) ->
 relase_opt_record_to_proplist(#release_opt{} = Rec) ->
   lists:zip(record_info(fields, release_opt), lists:map(fun to_binary/1, tl(tuple_to_list(Rec)))).
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Execute a command on gen_media/freeswitch_media process. Type defines a call type: call or cast
+%% @end
+%%--------------------------------------------------------------------
+execute_media(#call{source=Pid}=Call, call, Cmd) when is_record(Call, call) ->
+    gen_media:call(Pid, Cmd);
+execute_media(#call{source=Pid}=Call, cast, Cmd) when is_record(Call, call) ->
+    gen_media:cast(Pid, Cmd);
+execute_media(Pid, Type, Cmd) when is_pid(Pid) ->
+    #agent{statedata=Call} = agent:dump_state(Pid),
+    execute_media(Call, Type, Cmd).
 %%--------------------------------------------------------------------
 %% @doc
 %% Convert terms into binary format. 
