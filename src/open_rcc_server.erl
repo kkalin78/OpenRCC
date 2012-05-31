@@ -28,6 +28,9 @@
 
 -define(SERVER, ?MODULE).
 
+-define(MOCHI_WEB_HTTP, openrcc_http_mochi).
+-define(MOCHI_WEB_HTTPS, openrcc_https_mochi).
+
 %% HTTP routines and Responses
 -define(CONTENT_JSON, [{"Content-Type", "application/json"}]).
 -define(RESP_AGENT_NOT_LOGGED, {200, ?CONTENT_JSON, encode_response(<<"false">>, <<"Agent is not logged in">>)}).
@@ -73,19 +76,19 @@ code_change(_, _, State) ->
 start_mochiweb(Port) ->
     ?INFO("Starting OpenRCC REST http handler. Listening ports are HTTP ~p and HTTPS ~p", 
           [Port, Port + 1]),
-    %% We need to do start_link there to link Mochiweb process into Supervision tree
-    %% This process will die if Mochiweb process dies. 
-    %% Thus Supervisor has an opportunity to restar boths. 
-    mochiweb_http:start([{port, Port}, {loop, {?MODULE, mochiweb_loop}}]),
 
-    SslCertfile = util:get_certfile(),
-	SslKeyfile = util:get_keyfile(),
+    mochiweb_http:start([{port, Port}, 
+                         {loop, {?MODULE, mochiweb_loop}},
+                         {name, ?MOCHI_WEB_HTTP}
+                        ]),
+
     mochiweb_http:start([
+                         {name, ?MOCHI_WEB_HTTPS},
                          {port, Port + 1}, 
                          {ssl, true},
-						 {ssl_opts, [
-                                     {certfile, SslCertfile},
-                                     {keyfile, SslKeyfile}
+	 					 {ssl_opts, [
+                                     {certfile, get_certfile()},
+                                     {keyfile, get_keyfile()}
                                     ]},
                          {loop, {?MODULE, mochiweb_loop}}]).
 
@@ -715,3 +718,47 @@ to_pid(Var) when is_list(Var) ->
     list_to_pid(Var);
 to_pid(Var) when is_pid(Var) ->
     Var.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Returns open_rcc application path where it has been started. 
+%% Overwise it returns current folder.
+%% @end
+%%--------------------------------------------------------------------
+get_app_dir() ->
+    case code:lib_dir(open_rcc) of 
+        {error, _} ->
+            "./";
+        Dir ->
+            Dir
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Returns SSL certificated defined either in appication config or 
+%% self-signed ceritifcate created by buildcert.sh
+%% @end
+%%--------------------------------------------------------------------
+get_certfile() ->
+    case application:get_env(open_rcc, certfile) of 
+        undefined ->
+            {ok, Hostname} = inet:gethostname(),
+            filename:join(get_app_dir(), io_lib:format("~s.self.crt", [Hostname]));
+        {ok, Cert} ->
+            Cert
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Returns SSL key defined either in appication config or 
+%% self-key created by buildcert.sh
+%% @end
+%%--------------------------------------------------------------------
+get_keyfile() ->
+    case application:get_env(open_rcc, keyfile) of
+        undefined ->
+            {ok, Hostname} = inet:gethostname(),
+            filename:join(get_app_dir(), io_lib:format("~s.self.key", [Hostname]));
+        {ok, Key} ->
+            Key
+    end.
