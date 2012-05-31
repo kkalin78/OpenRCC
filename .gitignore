@@ -26,3 +26,9 @@ include/commit_ver.hrl
 
 #Etags
 TAGS
+
+# Self-signed certificates
+*.self.key
+*.self.key.pub
+*.self.csr
+*.self.crt
